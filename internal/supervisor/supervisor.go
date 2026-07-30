@@ -89,6 +89,19 @@ func Start(spec Spec) (Process, error) {
 			identityErr = nil
 			break
 		}
+		// A process that exits before exec can populate its live command line
+		// (e.g. a runtime that fails immediately) leaves a present-but-empty
+		// /proc/<pid>/cmdline that no amount of retrying will fill. Its start
+		// identity is still readable, so record that and keep the spec-derived
+		// command already held by process.Command rather than failing. Only do
+		// this once the process has actually exited; a live process mid-exec
+		// must keep retrying so its full command line is recorded.
+		if startErr == nil && exited(process.PID) {
+			process.StartedAt = startedAt.UTC()
+			process.StartToken = token
+			identityErr = nil
+			break
+		}
 		identityErr = errors.Join(commandErr, startErr)
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -166,20 +179,7 @@ func cmdline(pid int) (string, error) {
 	// Prefer /proc (Linux, the deployment target); fall back to ps for
 	// development on macOS.
 	if raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-		command := strings.ReplaceAll(strings.TrimRight(string(raw), "\x00"), "\x00", " ")
-		if command != "" {
-			return command, nil
-		}
-		// A process that has already exited leaves a present-but-empty cmdline
-		// behind while still exposing its short name via comm. Fall back to comm,
-		// and surface a real error when even that is unavailable so identity
-		// capture never observes an empty-string, nil-error result.
-		if comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
-			if name := strings.TrimSpace(string(comm)); name != "" {
-				return name, nil
-			}
-		}
-		return "", fmt.Errorf("empty command line for pid %d", pid)
+		return strings.ReplaceAll(strings.TrimRight(string(raw), "\x00"), "\x00", " "), nil
 	}
 	out, err := exec.Command("ps", "-ww", "-p", fmt.Sprint(pid), "-o", "command=").Output()
 	if err != nil {

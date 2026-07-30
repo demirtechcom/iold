@@ -52,6 +52,24 @@ func processStartInfo(pid int) (time.Time, string, error) {
 	return startedAt, "linux:" + fields[19], nil
 }
 
+// exited reports whether the process is gone or has become a zombie awaiting
+// reaping. A zombie keeps its /proc entry and start identity but will never
+// populate a live command line, so identity capture must stop retrying.
+func exited(pid int) bool {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	line := string(raw)
+	closeParen := strings.LastIndex(line, ")")
+	if closeParen < 0 {
+		return false
+	}
+	// Field 3 (state) is the first token after the comm field.
+	fields := strings.Fields(line[closeParen+1:])
+	return len(fields) > 0 && (fields[0] == "Z" || fields[0] == "X" || fields[0] == "x")
+}
+
 func linuxBootTime() (int64, error) {
 	raw, err := os.ReadFile("/proc/stat")
 	if err != nil {
