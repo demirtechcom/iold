@@ -1,0 +1,14 @@
+# gitleaks configuration for iold.
+#
+# Extends the upstream default ruleset and allowlists synthetic credentials
+# that exist only as unit-test fixtures. internal/redact verifies that secrets
+# are stripped from logs, so its tests must embed obviously-fake secrets
+# (e.g. "sk-proj-abcdefgh12345678"). These are not real credentials.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic secrets used by redaction unit tests"
+paths = [
+  '''internal/redact/redact_test.go''',
+]
