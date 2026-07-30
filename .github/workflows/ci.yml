@@ -1,0 +1,64 @@
+  name: CI
+
+  on:
+    push:
+      branches: [main]
+    pull_request:
+
+  permissions:
+    contents: read
+
+  jobs:
+    test:
+      name: Format, vet, race tests
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-go@v5
+          with:
+            go-version-file: go.mod
+        - name: gofmt
+          run: |
+            unformatted=$(gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "gofmt required for:" && echo "$unformatted" && exit 1
+            fi
+        - name: go vet
+          run: go vet ./...
+        - name: go test (race)
+          run: go test -race ./...
+        - name: reproducible linux amd64 build
+          run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/iold
+
+    staticcheck:
+      name: Static analysis
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-go@v5
+          with:
+            go-version-file: go.mod
+        - name: staticcheck
+          run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+
+    vulncheck:
+      name: Vulnerability scan
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-go@v5
+          with:
+            go-version-file: go.mod
+        - name: govulncheck
+          run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+    secrets:
+      name: Secret scan
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+        - uses: gitleaks/gitleaks-action@v2
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
