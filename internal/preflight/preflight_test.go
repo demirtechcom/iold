@@ -14,7 +14,7 @@ type fakeProbes struct {
 	network  error
 }
 
-func (f fakeProbes) GPUs() ([]doctor.GPU, error)           { return f.gpus, nil }
+func (f fakeProbes) GPUs() ([]doctor.GPU, error)          { return f.gpus, nil }
 func (f fakeProbes) DiskFreeBytes(string) (uint64, error) { return f.diskFree, nil }
 func (f fakeProbes) CheckEndpoint(string) error           { return f.network }
 
@@ -54,7 +54,7 @@ func TestRunChecksFullHostAndReturnsPort(t *testing.T) {
 func TestRunAggregatesHardwareDiskNetworkAndRuntimeFailures(t *testing.T) {
 	spec := passingSpec()
 	spec.Probes = fakeProbes{
-		gpus: []doctor.GPU{{DriverVersion: "525.1", VRAMMiB: 8 * 1024, ComputeCapMajor: 8}},
+		gpus:     []doctor.GPU{{DriverVersion: "525.1", VRAMMiB: 8 * 1024, ComputeCapMajor: 8}},
 		diskFree: 1 << 30,
 		network:  errors.New("offline"),
 	}

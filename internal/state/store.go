@@ -24,6 +24,7 @@ type Deployment struct {
 	Alias            string
 	Artifact         string
 	ArtifactRevision string
+	ModelCacheDir    string
 	Port             int
 	PID              int
 	Command          string // command line recorded at process start, for PID ownership checks
@@ -55,6 +56,7 @@ var migrations = []string{
 	`ALTER TABLE deployments ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE deployments ADD COLUMN started_at TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE deployments ADD COLUMN start_token TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE deployments ADD COLUMN model_cache_dir TEXT NOT NULL DEFAULT ''`,
 }
 
 type Store struct {
@@ -135,9 +137,9 @@ func (s *Store) Create(d Deployment) (Deployment, error) {
 	d.CreatedAt = now
 	d.UpdatedAt = now
 	_, err := s.db.Exec(`INSERT INTO deployments
-		(id, alias, artifact, artifact_revision, port, pid, command, started_at, start_token, phase, failure_reason, idempotency_key, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ID, d.Alias, d.Artifact, d.ArtifactRevision, d.Port, d.PID, d.Command,
+		(id, alias, artifact, artifact_revision, model_cache_dir, port, pid, command, started_at, start_token, phase, failure_reason, idempotency_key, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, d.Alias, d.Artifact, d.ArtifactRevision, d.ModelCacheDir, d.Port, d.PID, d.Command,
 		formatOptionalTime(d.StartedAt), d.StartToken, string(d.Phase),
 		d.FailureReason, d.IdempotencyKey, d.CreatedAt.Format(time.RFC3339), d.UpdatedAt.Format(time.RFC3339))
 	if err != nil {
@@ -156,14 +158,14 @@ func isUniqueViolation(err error) bool {
 }
 
 func (s *Store) Get(id string) (Deployment, error) {
-	row := s.db.QueryRow(`SELECT id, alias, artifact, artifact_revision, port, pid, command, started_at, start_token, phase,
+	row := s.db.QueryRow(`SELECT id, alias, artifact, artifact_revision, model_cache_dir, port, pid, command, started_at, start_token, phase,
 		failure_reason, idempotency_key, created_at, updated_at
 		FROM deployments WHERE id = ?`, id)
 	return scanDeployment(row)
 }
 
 func (s *Store) List() ([]Deployment, error) {
-	rows, err := s.db.Query(`SELECT id, alias, artifact, artifact_revision, port, pid, command, started_at, start_token, phase,
+	rows, err := s.db.Query(`SELECT id, alias, artifact, artifact_revision, model_cache_dir, port, pid, command, started_at, start_token, phase,
 		failure_reason, idempotency_key, created_at, updated_at
 		FROM deployments ORDER BY created_at, id`)
 	if err != nil {
@@ -188,7 +190,7 @@ type scanner interface {
 func scanDeployment(row scanner) (Deployment, error) {
 	var d Deployment
 	var phase, startedAt, createdAt, updatedAt string
-	err := row.Scan(&d.ID, &d.Alias, &d.Artifact, &d.ArtifactRevision, &d.Port, &d.PID,
+	err := row.Scan(&d.ID, &d.Alias, &d.Artifact, &d.ArtifactRevision, &d.ModelCacheDir, &d.Port, &d.PID,
 		&d.Command, &startedAt, &d.StartToken, &phase, &d.FailureReason, &d.IdempotencyKey,
 		&createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

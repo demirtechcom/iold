@@ -1,6 +1,7 @@
 package state
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -225,6 +226,43 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 		store.Close()
+	}
+}
+
+func TestMigrationAddsProcessIdentityToLegacyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "iold.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO deployments
+		(id, alias, artifact, artifact_revision, port, pid, command, phase, failure_reason, idempotency_key, created_at, updated_at)
+		VALUES ('legacy', 'legacy', 'org/model', 'rev', 8000, 0, '', 'REQUESTED', '', 'idem', ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated database: %v", err)
+	}
+	defer store.Close()
+	deployment, err := store.Get("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deployment.StartedAt.IsZero() || deployment.StartToken != "" {
+		t.Fatalf("legacy identity should migrate empty: %+v", deployment)
 	}
 }
 

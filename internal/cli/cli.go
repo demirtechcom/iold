@@ -393,7 +393,7 @@ func destroyOne(store *state.Store, deployment state.Deployment, purge bool, std
 	}
 
 	if deployment.Phase == state.PhaseDestroying {
-		if err := removeOwnedData(deployment.ID); err != nil {
+		if err := removeOwnedData(deployment); err != nil {
 			return err
 		}
 		if err := store.Transition(deployment.ID, state.PhaseDestroying, state.PhaseDestroyed, ""); err != nil {
@@ -441,22 +441,51 @@ func ownedPaths(id string) ([]string, error) {
 	return []string{logFile, deploymentDir}, nil
 }
 
-func removeOwnedData(id string) error {
-	paths, err := ownedPaths(id)
+func removeOwnedData(deployment state.Deployment) error {
+	paths, err := ownedPaths(deployment.ID)
 	if err != nil {
 		return err
 	}
-	cachePath, err := deploymentModelCacheDir(id)
-	if err != nil {
-		return err
+	cachePath := deployment.ModelCacheDir
+	if cachePath == "" {
+		cachePath, err = deploymentModelCacheDir(deployment.ID)
+		if err != nil {
+			return err
+		}
 	}
-	paths = append(paths, cachePath)
+	owned, ownershipErr := modelCacheOwnedBy(cachePath, deployment)
+	if ownershipErr != nil {
+		return ownershipErr
+	}
+	if owned {
+		paths = append(paths, cachePath)
+	}
 	for _, path := range paths {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove %s: %w", path, err)
 		}
 	}
 	return nil
+}
+
+func modelCacheOwnedBy(path string, deployment state.Deployment) (bool, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) || filepath.Base(clean) != deployment.ID || deployment.IdempotencyKey == "" {
+		return false, fmt.Errorf("unsafe model cache path %q for deployment %s", path, deployment.ID)
+	}
+	if _, err := os.Stat(clean); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	marker, err := os.ReadFile(filepath.Join(clean, modelCacheOwnerFile))
+	if err != nil {
+		return false, fmt.Errorf("refusing to remove unowned model cache %s: %w", clean, err)
+	}
+	if strings.TrimSpace(string(marker)) != deployment.IdempotencyKey {
+		return false, fmt.Errorf("refusing to remove model cache %s with mismatched ownership marker", clean)
+	}
+	return true, nil
 }
 
 func logPath(id string) (string, error) {

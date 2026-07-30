@@ -27,7 +27,7 @@ func newFakeHub(t *testing.T, routes map[string]string) (*Client, *httptest.Serv
 
 func TestGetModelParsesGatedBoolAndString(t *testing.T) {
 	client, _ := newFakeHub(t, map[string]string{
-		"/api/models/open/model":  `{"id":"open/model","gated":false,"safetensors":{"parameters":{"BF16":1000},"total":1000}}`,
+		"/api/models/open/model":  `{"id":"open/model","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gated":false,"safetensors":{"parameters":{"BF16":1000},"total":1000}}`,
 		"/api/models/gated/model": `{"id":"gated/model","gated":"manual"}`,
 	})
 
@@ -41,6 +41,9 @@ func TestGetModelParsesGatedBoolAndString(t *testing.T) {
 	if open.Safetensors.Total != 1000 {
 		t.Errorf("total = %d, want 1000", open.Safetensors.Total)
 	}
+	if open.SHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("sha = %q", open.SHA)
+	}
 
 	gated, err := client.GetModel(context.Background(), "gated/model")
 	if err != nil {
@@ -48,6 +51,20 @@ func TestGetModelParsesGatedBoolAndString(t *testing.T) {
 	}
 	if !gated.Gated.IsGated || gated.Gated.Mode != "manual" {
 		t.Errorf("gated = %+v, want manual gate", gated.Gated)
+	}
+}
+
+func TestGetConfigAtImmutableRevision(t *testing.T) {
+	const revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	client, _ := newFakeHub(t, map[string]string{
+		"/org/model/raw/" + revision + "/config.json": `{"model_type":"llama","num_hidden_layers":32}`,
+	})
+	cfg, err := client.GetConfigAtRevision(context.Background(), "org/model", revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelType != "llama" || cfg.NumHiddenLayers != 32 {
+		t.Fatalf("config = %+v", cfg)
 	}
 }
 

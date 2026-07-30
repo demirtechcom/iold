@@ -204,6 +204,55 @@ func TestStatusReconcilesDeadRuntimeAsCrashed(t *testing.T) {
 	}
 }
 
+func TestStatusAdoptsProcessStartedAfterPersistedIntent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("IOLD_STATE_DIR", dir)
+	seedRecoveryDeployment(t, dir, "dep-intent")
+	args := []string{"-c", "while true; do sleep 0.1; done"}
+	intent := runtimeCommandString("sh", args)
+	store := openRecoveryStore(t, dir)
+	walkPhases(t, store, "dep-intent", state.PhaseValidating, state.PhaseDownloading)
+	if err := store.SetRuntimeIntent("dep-intent", 8000, intent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transition("dep-intent", state.PhaseDownloading, state.PhaseStarting, ""); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	proc, err := supervisor.Start(supervisor.Spec{
+		Command: "sh", Args: args,
+		LogPath: filepath.Join(dir, "logs", "dep-intent.log"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Stop(proc, 200*time.Millisecond) })
+
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"status", "dep-intent", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	store = openRecoveryStore(t, dir)
+	adopted, err := store.Get("dep-intent")
+	store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Phase != state.PhaseCrashed || adopted.PID != proc.PID ||
+		adopted.StartToken == "" || adopted.StartedAt.IsZero() {
+		t.Fatalf("STARTING intent was not safely adopted: %+v", adopted)
+	}
+
+	stdout.Reset()
+	if err := Run([]string{"destroy", "dep-intent"}, &stdout, &stderr); err != nil {
+		t.Fatalf("destroy adopted runtime: %v", err)
+	}
+	if supervisor.Alive(proc.PID) {
+		t.Fatalf("adopted runtime %d survived destroy", proc.PID)
+	}
+}
+
 // TestDestroyAllMixedPhases covers `destroy --all` over one deployment
 // that is already DESTROYED and one still in REQUESTED: both must end
 // DESTROYED and the billing warning must print exactly once.

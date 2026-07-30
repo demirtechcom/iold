@@ -38,7 +38,7 @@ Gated models (Llama, Gemma, …) work when `HF_TOKEN` is set in the environment.
 
 ## Status
 
-The full lifecycle — plan, deploy, health and inference readiness checks, status, redacted logs, ownership-safe destroy — is implemented and covered by 113 race-detector-clean tests against fake vLLM/gateway servers. Validation on real RunPod GPU hardware and automatic gateway registration are in progress; see the [task backlog](docs/TASKS.md).
+The full lifecycle — plan, deploy, health and inference readiness checks, status, write-time-redacted logs, and ownership-safe process-group destroy — is implemented and covered by race-detector-clean tests against fake vLLM/gateway servers. Validation on real RunPod GPU hardware and automatic gateway registration are in progress; see the [task backlog](docs/TASKS.md).
 
 > **Billing warning:** `iold destroy` stops the model, not the Pod. RunPod keeps billing until you stop the Pod in the RunPod console.
 

@@ -96,7 +96,7 @@ Unsloth is an artifact publisher here, not an installed service or Python depend
 
 ### Runtime manager
 
-Starts one vLLM server process per deployment, allocates a unique local port, captures stdout/stderr, records the PID, and performs graceful then forced shutdown. A supervisor process may remain running after the CLI returns; system reboot persistence is explicitly disabled for v0.
+Starts one vLLM server process per deployment, allocates a unique local port, and records the PID together with the OS process-start identity and exact command. Shutdown verifies all three values, signals the dedicated process group, waits for the entire group to empty, and escalates the group to SIGKILL when necessary. Runtime stdout/stderr passes through a detached redacting proxy before it reaches the on-disk log. System reboot persistence is explicitly disabled for v0.
 
 Because a vLLM server hosts one model at a time, multiple models mean multiple vLLM processes. `iold add` must reject a model when the catalog's conservative VRAM budget, GPU topology, disk, or port checks fail.
 
@@ -117,7 +117,9 @@ Do not write directly to the gateway's database or configuration files from the 
 
 ### State store
 
-IOLD needs local ownership state even if the gateway uses PostgreSQL. Recommended v0 storage is a small SQLite database at `$IOLD_STATE_DIR/iold.db`, defaulting to `/workspace/.iold/iold.db` on RunPod so it can use persistent volume storage. Writes use transactions and restrictive permissions.
+IOLD needs local ownership state even if the gateway uses PostgreSQL. Recommended v0 storage is a small SQLite database at `$IOLD_STATE_DIR/iold.db`, defaulting to `/workspace/.iold/iold.db` on RunPod so it can use persistent volume storage. Writes use transactions and restrictive permissions. Deploy and destroy hold a cross-process file lock for their complete lifecycle, including port allocation. Before exec, a `STARTING` intent containing the port and command is persisted; recovery can adopt the uniquely matching process and save its complete identity.
+
+Each deployment stores its immutable Hugging Face commit SHA and its resolved model-cache directory. The cache directory contains an ownership marker tied to the deployment idempotency key; destroy verifies this marker before deletion.
 
 PostgreSQL stores central gateway deployment/registration metadata. Vault stores gateway-side secrets. Vault is not a log store. Runtime logs stay local in v0; structured operational events can later be sent to the gateway.
 
@@ -132,10 +134,11 @@ REQUESTED -> VALIDATING -> DOWNLOADING -> STARTING -> HEALTHY
                                              READY    UNREGISTERED_HEALTHY
 
 Any state -> FAILED
-READY/FAILED -> DESTROYING -> DESTROYED
+Interrupted/live-state mismatch -> CRASHED
+READY/FAILED/CRASHED -> DESTROYING -> DESTROYED
 ```
 
-Each transition is persisted before and after its side effect. Operations carry a stable deployment ID and idempotency key. On startup, IOLD reconciles recorded PIDs, ports, processes, endpoints, and gateway records.
+Each transition is persisted before and after its side effect. Operations carry a stable deployment ID and idempotency key. On startup and unlocked status calls, IOLD reconciles recorded PIDs, process-start identities, ports, processes, endpoints, and gateway records. A dead runtime is persisted as `CRASHED`; status never continues presenting it as healthy.
 
 ## 7. Health and readiness
 
@@ -155,7 +158,7 @@ The end-to-end inference check is required before the deployment is marked `READ
 - Preferred production ingress is an outbound-only Cloudflare Tunnel plus service-to-service Access policy, or an equivalently restricted network path.
 - With RunPod proxy, use application authentication and accept that the origin is publicly reachable through the proxy.
 - Read secrets from environment variables or root-readable files, never CLI flags.
-- Redact tokens, Authorization headers, and URLs containing credentials from logs.
+- Redact tokens, Authorization headers (including JSON form), and URLs containing credentials before logs are written to disk.
 - `.env`, state, databases, downloaded weights, and logs are ignored by Git.
 - Pin runtime images by immutable digest and model repositories by revision.
 

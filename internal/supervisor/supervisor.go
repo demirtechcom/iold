@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -70,25 +71,38 @@ func Start(spec Spec) (Process, error) {
 	// Only the runtime retains the pipe's write end. The detached log proxy
 	// exits on EOF after the complete runtime process tree closes it.
 	logPipe.Close()
-	// Reap the child if it exits while this (CLI) process is still
-	// alive; otherwise a zombie would keep the PID looking alive.
-	go func() { _ = cmd.Wait() }()
-
 	process := Process{
 		PID:     cmd.Process.Pid,
 		Command: commandString(spec.Command, spec.Args),
 		LogPath: spec.LogPath,
 	}
 	// Capture the post-exec command line and the OS-native start identity.
-	// If a very short-lived child exits first, Start still returns its PID so
-	// callers can classify the launch as stale rather than losing the event.
-	if current, err := cmdline(process.PID); err == nil {
-		process.Command = normalize(current)
+	var identityErr error
+	for range 20 {
+		current, commandErr := cmdline(process.PID)
+		startedAt, token, startErr := processStartInfo(process.PID)
+		normalizedCommand := normalize(current)
+		if commandErr == nil && startErr == nil && normalizedCommand != "" {
+			process.Command = normalizedCommand
+			process.StartedAt = startedAt.UTC()
+			process.StartToken = token
+			identityErr = nil
+			break
+		}
+		identityErr = errors.Join(commandErr, startErr)
+		time.Sleep(5 * time.Millisecond)
 	}
-	if startedAt, token, err := processStartInfo(process.PID); err == nil {
-		process.StartedAt = startedAt.UTC()
-		process.StartToken = token
+	if process.StartToken == "" || process.StartedAt.IsZero() {
+		// cmd.Process is the unreaped child handle created above, so killing it
+		// here cannot suffer PID reuse even though identity capture failed.
+		_ = syscall.Kill(-process.PID, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return Process{}, fmt.Errorf("%w: capture process identity: %v", ErrStartFail, identityErr)
 	}
+	// Capture identity before Wait can reap a very short-lived process and
+	// make its PID reusable. Reap asynchronously after the snapshot.
+	go func() { _ = cmd.Wait() }()
 	return process, nil
 }
 
@@ -154,7 +168,7 @@ func cmdline(pid int) (string, error) {
 	if raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
 		return strings.ReplaceAll(strings.TrimRight(string(raw), "\x00"), "\x00", " "), nil
 	}
-	out, err := exec.Command("ps", "-p", fmt.Sprint(pid), "-o", "command=").Output()
+	out, err := exec.Command("ps", "-ww", "-p", fmt.Sprint(pid), "-o", "command=").Output()
 	if err != nil {
 		return "", fmt.Errorf("read command line of pid %d: %w", pid, err)
 	}
@@ -230,15 +244,32 @@ func FindByCommand(command string, notBefore time.Time) ([]Process, error) {
 }
 
 func matchesCommandIntent(current, intent string) bool {
-	if current == intent {
+	currentArgv := strings.Fields(current)
+	intentArgv := strings.Fields(intent)
+	if len(currentArgv) == 0 || len(intentArgv) == 0 {
+		return false
+	}
+	if slices.Equal(currentArgv, intentArgv) {
 		return true
 	}
-	// Script entry points commonly appear in ps as
-	// "python /absolute/path/vllm <args>" even though exec was requested as
-	// "vllm <args>". Recovery may match the complete argv suffix, but Stop
-	// subsequently persists and requires the exact observed command.
-	_, args, found := strings.Cut(intent, " ")
-	return found && args != "" && strings.HasSuffix(current, " "+args)
+	// Exec may resolve argv[0] to an absolute path. Require the same executable
+	// basename and exact remaining argv rather than accepting an arbitrary
+	// command-line suffix.
+	if filepath.Base(currentArgv[0]) == filepath.Base(intentArgv[0]) &&
+		slices.Equal(currentArgv[1:], intentArgv[1:]) {
+		return true
+	}
+	// Script entry points can appear as "python /absolute/path/vllm <args>"
+	// even though exec was requested as "vllm <args>". Accept only that one
+	// interpreter prefix, the same entry-point basename, and exact arguments.
+	return len(currentArgv) == len(intentArgv)+1 && isPythonInterpreter(currentArgv[0]) &&
+		filepath.Base(currentArgv[1]) == filepath.Base(intentArgv[0]) &&
+		slices.Equal(currentArgv[2:], intentArgv[1:])
+}
+
+func isPythonInterpreter(command string) bool {
+	base := filepath.Base(command)
+	return base == "python" || base == "python3" || strings.HasPrefix(base, "python3.")
 }
 
 // Stop terminates an owned process: SIGTERM to its session, then

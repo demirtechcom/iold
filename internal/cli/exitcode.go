@@ -37,7 +37,8 @@ func ExitCode(err error) int {
 	case errors.Is(err, state.ErrIllegalTransition), errors.Is(err, state.ErrConflict),
 		errors.Is(err, state.ErrDuplicate), errors.Is(err, state.ErrNotDestroyed):
 		return ExitConflict
-	case errors.Is(err, doctor.ErrChecksFailed), errors.Is(err, hf.ErrAuthRequired):
+	case errors.Is(err, doctor.ErrChecksFailed), errors.Is(err, hf.ErrAuthRequired),
+		errors.Is(err, hf.ErrNoRevision):
 		return ExitEnvironment
 	case errors.Is(err, ErrNotImplemented):
 		return ExitNotImplemented

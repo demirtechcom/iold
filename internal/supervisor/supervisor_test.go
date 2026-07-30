@@ -144,6 +144,29 @@ func TestReconcileRejectsSameCommandWithDifferentStartIdentity(t *testing.T) {
 	}
 }
 
+func TestCommandIntentMatchingRequiresExactArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		intent  string
+		want    bool
+	}{
+		{"exact", "vllm serve org/model --port 8000", "vllm serve org/model --port 8000", true},
+		{"resolved executable", "/opt/bin/vllm serve org/model --port 8000", "vllm serve org/model --port 8000", true},
+		{"python entrypoint", "python3 /opt/bin/vllm serve org/model --port 8000", "vllm serve org/model --port 8000", true},
+		{"different executable", "other serve org/model --port 8000", "vllm serve org/model --port 8000", false},
+		{"extra prefix", "unrelated --flag vllm serve org/model --port 8000", "vllm serve org/model --port 8000", false},
+		{"different argument", "vllm serve org/other --port 8000", "vllm serve org/model --port 8000", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := matchesCommandIntent(test.current, test.intent); got != test.want {
+				t.Fatalf("matchesCommandIntent(%q, %q) = %v, want %v", test.current, test.intent, got, test.want)
+			}
+		})
+	}
+}
+
 func TestStopWaitsForAndKillsWorkerProcessGroup(t *testing.T) {
 	proc := startShell(t, `trap 'exit 0' TERM; sh -c 'trap "" TERM; while true; do sleep 1; done' & while true; do sleep 0.05; done`)
 	waitFor(t, 5*time.Second, func() bool { return processGroupAlive(proc.PID) }, "process group never came up")

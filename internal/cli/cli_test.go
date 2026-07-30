@@ -6,11 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-
-	"github.com/demirtechcom/iold/internal/catalog"
 	"strings"
 	"testing"
 
+	"github.com/demirtechcom/iold/internal/catalog"
 	"github.com/demirtechcom/iold/internal/doctor"
 	"github.com/demirtechcom/iold/internal/state"
 	"github.com/demirtechcom/iold/internal/supervisor"
@@ -104,6 +103,10 @@ func TestStatusEmptyStore(t *testing.T) {
 
 func seedDeployment(t *testing.T, dir string) {
 	t.Helper()
+	cacheDir, err := deploymentModelCacheDir("dep-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := state.Open(filepath.Join(dir, "iold.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -114,6 +117,7 @@ func seedDeployment(t *testing.T, dir string) {
 		Alias:            "qwen3.6-35b-a3b",
 		Artifact:         "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast",
 		ArtifactRevision: "rev",
+		ModelCacheDir:    cacheDir,
 		Port:             8000,
 		IdempotencyKey:   "idem-1",
 	})
@@ -153,7 +157,7 @@ func TestStatusListsDeployment(t *testing.T) {
 		t.Fatalf("status returned error: %v", err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "dep-1") || !strings.Contains(out, "REQUESTED") {
+	if !strings.Contains(out, "dep-1") || !strings.Contains(out, "CRASHED") {
 		t.Fatalf("output missing deployment row:\n%s", out)
 	}
 }
@@ -222,7 +226,16 @@ func TestLogsMissingDeploymentFails(t *testing.T) {
 func TestDestroyStopsProcessRemovesDataAndWarnsAboutBilling(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("IOLD_STATE_DIR", dir)
+	cacheRoot := filepath.Join(dir, "model-cache")
+	t.Setenv("IOLD_MODEL_CACHE", cacheRoot)
 	seedDeployment(t, dir)
+	cachePath := filepath.Join(cacheRoot, "dep-1")
+	if err := prepareModelCache(cachePath, "dep-1", "idem-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "weights.bin"), []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// The loop keeps sh itself alive; a single command would be
 	// exec-replaced and change the process's command line.
@@ -250,6 +263,12 @@ func TestDestroyStopsProcessRemovesDataAndWarnsAboutBilling(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "logs", "dep-1.log")); !os.IsNotExist(err) {
 		t.Fatalf("log file not removed: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("deployment model cache not removed: %v", err)
+	}
+	if _, err := os.Stat(cacheRoot); err != nil {
+		t.Fatalf("shared cache root should remain: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "billing continues") {
 		t.Fatalf("missing billing warning:\n%s", stdout.String())
@@ -285,6 +304,42 @@ func TestDestroyPurgeRemovesTombstone(t *testing.T) {
 	defer store.Close()
 	if _, err := store.Get("dep-1"); !errors.Is(err, state.ErrNotFound) {
 		t.Fatalf("expected purged record, got %v", err)
+	}
+}
+
+func TestDestroyRefusesMismatchedModelCacheOwnership(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("IOLD_STATE_DIR", dir)
+	cacheRoot := filepath.Join(dir, "model-cache")
+	t.Setenv("IOLD_MODEL_CACHE", cacheRoot)
+	seedDeployment(t, dir)
+	cachePath := filepath.Join(cacheRoot, "dep-1")
+	if err := prepareModelCache(cachePath, "dep-1", "different-owner"); err != nil {
+		t.Fatal(err)
+	}
+	weightPath := filepath.Join(cachePath, "weights.bin")
+	if err := os.WriteFile(weightPath, []byte("must survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Run([]string{"destroy", "dep-1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "mismatched ownership marker") {
+		t.Fatalf("destroy error = %v, want ownership refusal", err)
+	}
+	if data, readErr := os.ReadFile(weightPath); readErr != nil || string(data) != "must survive" {
+		t.Fatalf("unowned cache was modified: data=%q err=%v", data, readErr)
+	}
+	store, openErr := state.Open(filepath.Join(dir, "iold.db"))
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	deployment, getErr := store.Get("dep-1")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if deployment.Phase != state.PhaseDestroying {
+		t.Fatalf("phase = %s, want DESTROYING after refused cleanup", deployment.Phase)
 	}
 }
 

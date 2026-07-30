@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/demirtechcom/iold/internal/doctor"
 	"github.com/demirtechcom/iold/internal/fakes"
-	"github.com/demirtechcom/iold/internal/hf"
 	"github.com/demirtechcom/iold/internal/state"
 	"github.com/demirtechcom/iold/internal/supervisor"
 )
@@ -49,7 +49,7 @@ func stopDeploymentProcess(t *testing.T, dbPath, id string) {
 	}
 	defer store.Close()
 	if d, err := store.Get(id); err == nil && d.PID > 0 {
-		proc := supervisor.Process{PID: d.PID, Command: d.Command}
+		proc := deploymentProcess(d)
 		if supervisor.Reconcile(proc) == supervisor.StatusRunning {
 			_ = supervisor.Stop(proc, 2*time.Second)
 		}
@@ -79,6 +79,9 @@ func TestDeployCatalogModelReachesUnregisteredHealthy(t *testing.T) {
 	}
 	if deployment.Phase != state.PhaseUnregisteredHealthy {
 		t.Errorf("phase = %s, want UNREGISTERED_HEALTHY", deployment.Phase)
+	}
+	if deployment.ArtifactRevision != testRevision {
+		t.Errorf("revision = %q, want immutable SHA %q", deployment.ArtifactRevision, testRevision)
 	}
 	if deployment.PID <= 0 || !supervisor.Alive(deployment.PID) {
 		t.Errorf("runtime pid %d not alive", deployment.PID)
@@ -135,7 +138,7 @@ func TestDeployFailedLoadMarksFailedAndStopsRuntime(t *testing.T) {
 		t.Error("failure reason not recorded")
 	}
 	if deployment.PID > 0 && supervisor.Alive(deployment.PID) {
-		proc := supervisor.Process{PID: deployment.PID, Command: deployment.Command}
+		proc := deploymentProcess(deployment)
 		if supervisor.Reconcile(proc) == supervisor.StatusRunning {
 			t.Error("runtime process leaked after failed deploy")
 			_ = supervisor.Stop(proc, 2*time.Second)
@@ -272,8 +275,146 @@ func TestDeployHFModelResolvesViaPlannerGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Phase != state.PhaseUnregisteredHealthy || d.Artifact != "Qwen/Small-7B" {
+	if d.Phase != state.PhaseUnregisteredHealthy || d.Artifact != "Qwen/Small-7B" || d.ArtifactRevision != testRevision {
 		t.Errorf("deployment = %+v", d)
+	}
+}
+
+func TestDeployCatalogRunsSharedHardwarePreflight(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("IOLD_STATE_DIR", stateDir)
+	vllm := fakes.NewVLLM(fakes.VLLMOptions{Model: "qwen3.6-35b-a3b"})
+	defer vllm.Close()
+	deps := testDeployDeps(t, vllm)
+	deps.probes = fakeProbes{
+		gpus: []doctor.GPU{{
+			Name: "NVIDIA H100", DriverVersion: "575.51.03",
+			VRAMMiB: 96 * 1024, ComputeCapMajor: 9,
+		}},
+		diskFree: 500 << 30,
+	}
+	err := runDeploy([]string{"qwen3.6-35b-a3b"}, deps, &bytes.Buffer{})
+	if !errors.Is(err, doctor.ErrChecksFailed) {
+		t.Fatalf("err = %v, want hardware preflight failure", err)
+	}
+	store, openErr := state.Open(filepath.Join(stateDir, "iold.db"))
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer store.Close()
+	deployments, listErr := store.List()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(deployments) != 0 {
+		t.Fatalf("preflight created state: %+v", deployments)
+	}
+}
+
+func TestDeployPassesOwnedCacheToRuntime(t *testing.T) {
+	stateDir := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("IOLD_STATE_DIR", stateDir)
+	t.Setenv("IOLD_MODEL_CACHE", cacheRoot)
+	vllm := fakes.NewVLLM(fakes.VLLMOptions{Model: "qwen3.6-35b-a3b"})
+	defer vllm.Close()
+	deps := testDeployDeps(t, vllm)
+	deps.vllmCmd = func(deploySpec) (string, []string) {
+		return "sh", []string{"-c", `echo "HF_HOME=$HF_HOME"; while true; do sleep 0.1; done`}
+	}
+	t.Cleanup(func() { stopDeploymentProcess(t, filepath.Join(stateDir, "iold.db"), "qwen3.6-35b-a3b") })
+	if err := runDeploy([]string{"qwen3.6-35b-a3b"}, deps, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "HF_HOME=" + filepath.Join(cacheRoot, "qwen3.6-35b-a3b")
+	logFile := filepath.Join(stateDir, "logs", "qwen3.6-35b-a3b.log")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(logFile)
+		if err == nil && strings.Contains(string(data), want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime log did not contain %q: %s", want, data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	persistedCache := filepath.Join(cacheRoot, "qwen3.6-35b-a3b")
+	t.Setenv("IOLD_MODEL_CACHE", filepath.Join(t.TempDir(), "different-cache"))
+	if err := Run([]string{"destroy", "qwen3.6-35b-a3b"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("destroy with changed cache environment: %v", err)
+	}
+	if _, err := os.Stat(persistedCache); !os.IsNotExist(err) {
+		t.Fatalf("persisted deployment cache was not removed: %v", err)
+	}
+}
+
+func TestVLLMCommandPinsRevisionAndDownloadDirectory(t *testing.T) {
+	_, args := vllmCommand(deploySpec{
+		ID: "model", Artifact: "org/model", Revision: testRevision,
+		Port: 8000, CacheDir: "/workspace/.iold/models/model",
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--revision "+testRevision) ||
+		!strings.Contains(joined, "--download-dir /workspace/.iold/models/model") {
+		t.Fatalf("vLLM args are not pinned to revision/cache: %v", args)
+	}
+}
+
+func TestConcurrentDeploysAreSerializedByLifecycleLock(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("IOLD_STATE_DIR", stateDir)
+	hub := fakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/org/model-a", "/api/models/org/model-b":
+			id := strings.TrimPrefix(r.URL.Path, "/api/models/")
+			fmt.Fprintf(w, `{"id":%q,"sha":%q,"gated":false,"safetensors":{"parameters":{"BF16":1000000000},"total":1000000000}}`, id, testRevision)
+		case "/org/model-a/raw/" + testRevision + "/config.json",
+			"/org/model-b/raw/" + testRevision + "/config.json":
+			w.Write([]byte(`{"model_type":"llama","num_hidden_layers":8,"num_attention_heads":8,"num_key_value_heads":2,"hidden_size":1024}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	vllmA := fakes.NewVLLM(fakes.VLLMOptions{Model: "model-a"})
+	defer vllmA.Close()
+	vllmB := fakes.NewVLLM(fakes.VLLMOptions{Model: "model-b"})
+	defer vllmB.Close()
+	depsA := testDeployDeps(t, vllmA)
+	depsB := testDeployDeps(t, vllmB)
+	depsA.hub, depsB.hub = hub, hub
+
+	errs := make(chan error, 2)
+	go func() { errs <- runDeploy([]string{"org/model-a"}, depsA, &bytes.Buffer{}) }()
+	go func() { errs <- runDeploy([]string{"org/model-b"}, depsB, &bytes.Buffer{}) }()
+	first, second := <-errs, <-errs
+	var successes, conflicts int
+	for _, err := range []error{first, second} {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrWouldReplace):
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent deploy result: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want one each", successes, conflicts)
+	}
+
+	store, err := state.Open(filepath.Join(stateDir, "iold.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployments, err := store.List()
+	store.Close()
+	if err != nil || len(deployments) != 1 {
+		t.Fatalf("deployments=%+v err=%v", deployments, err)
+	}
+	proc := deploymentProcess(deployments[0])
+	if supervisor.Reconcile(proc) == supervisor.StatusRunning {
+		_ = supervisor.Stop(proc, time.Second)
 	}
 }
 

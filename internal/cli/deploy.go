@@ -130,6 +130,9 @@ func runDeploy(args []string, deps deployDeps, stdout io.Writer) error {
 	if ref == "" {
 		return usage
 	}
+	if _, err := catalog.Get(ref); err != nil && !strings.Contains(ref, "/") {
+		return fmt.Errorf("%w: %s (not a catalog alias; Hugging Face IDs look like org/model)", catalog.ErrUnknownModel, ref)
+	}
 
 	lifecycleLock, err := operationlock.Acquire(operationLockPath())
 	if err != nil {
@@ -210,6 +213,7 @@ func runDeploy(args []string, deps deployDeps, stdout io.Writer) error {
 		Alias:            spec.Alias,
 		Artifact:         spec.Artifact,
 		ArtifactRevision: spec.Revision,
+		ModelCacheDir:    spec.CacheDir,
 		Port:             spec.Port,
 		IdempotencyKey:   randomHex(16),
 	})
@@ -398,6 +402,9 @@ func executeDeploy(store *state.Store, deployment state.Deployment, spec deployS
 	}
 	spec.APIKey = "iold-" + randomHex(32)
 	if err := writeAPIKey(deployment.ID, spec.APIKey); err != nil {
+		return fail(state.PhaseValidating, err)
+	}
+	if err := prepareModelCache(spec.CacheDir, deployment.ID, deployment.IdempotencyKey); err != nil {
 		return fail(state.PhaseValidating, err)
 	}
 
@@ -605,6 +612,57 @@ func writeAPIKey(id, key string) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+const modelCacheOwnerFile = ".iold-owner"
+
+func prepareModelCache(path, id, ownershipKey string) error {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) || filepath.Base(clean) != id || ownershipKey == "" {
+		return fmt.Errorf("unsafe model cache path %q for deployment %s", path, id)
+	}
+	if err := os.MkdirAll(clean, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("model cache %s is not an owned directory", clean)
+	}
+	if err := os.Chmod(clean, 0o700); err != nil {
+		return err
+	}
+	marker := filepath.Join(clean, modelCacheOwnerFile)
+	if existing, err := os.ReadFile(marker); err == nil {
+		if strings.TrimSpace(string(existing)) != ownershipKey {
+			return fmt.Errorf("model cache %s belongs to another deployment", clean)
+		}
+		return os.Chmod(marker, 0o600)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	entries, err := os.ReadDir(clean)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("refusing to claim non-empty unowned model cache %s", clean)
+	}
+	file, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(file, ownershipKey); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // endpointURL resolves the public endpoint (M4-01): the RunPod proxy

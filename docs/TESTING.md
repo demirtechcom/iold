@@ -25,7 +25,10 @@ All packages run with the Go race detector where applicable.
 - fake vLLM HTTP server: delayed health, failed load, malformed model list, streaming, auth failure
 - fake gateway: conflict, idempotent replay, timeout, partial success, unavailable, and unregister failure
 - SQLite crash/reopen and interrupted-transition recovery
-- supervisor behavior for SIGTERM, SIGKILL, stale PID, PID reuse, and occupied port
+- supervisor behavior for SIGTERM, process-group SIGKILL, orphan workers, stale/reused PID plus start-time identity, and occupied port
+- cross-process lifecycle locking and concurrent deploy exclusion
+- STARTING-intent adoption and dead-runtime reconciliation to CRASHED
+- write-time log redaction, including JSON Authorization headers
 - install script platform selection and checksum failure
 
 ### Container tests
@@ -117,4 +120,3 @@ Do not write mutable versions into this document. A machine-readable release man
 - model repository revision
 - RunPod template version
 - cloudflared image/version when enabled
-
