@@ -19,7 +19,7 @@ import (
 var (
 	ErrNotFound     = errors.New("model not found on Hugging Face")
 	ErrAuthRequired = errors.New("model is gated or private; set HF_TOKEN to a token with access")
-	ErrNoRevision   = errors.New("Hugging Face response did not include an immutable revision SHA")
+	ErrNoRevision   = errors.New("response from Hugging Face did not include an immutable revision SHA")
 )
 
 const DefaultBaseURL = "https://huggingface.co"
