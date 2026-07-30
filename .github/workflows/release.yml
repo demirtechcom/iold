@@ -1,0 +1,40 @@
+  name: Release
+
+  on:
+    push:
+      tags: ["v*"]
+
+  permissions:
+    contents: write
+
+  jobs:
+    release:
+      name: Build and publish Linux amd64 release
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-go@v5
+          with:
+            go-version-file: go.mod
+        - name: Run tests
+          run: go test -race ./...
+        - name: Build
+          env:
+            VERSION: ${{ github.ref_name }}
+          run: |
+            mkdir -p dist
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+              -ldflags "-s -w -X github.com/demirtechcom/iold/internal/cli.Version=${VERSION}" \
+              -o "dist/iold_${VERSION}_linux_amd64" ./cmd/iold
+        - name: Checksums
+          working-directory: dist
+          run: sha256sum iold_* > checksums.txt
+        - name: Create GitHub release
+          uses: softprops/action-gh-release@v2
+          with:
+            files: |
+              dist/iold_*
+              dist/checksums.txt
+            fail_on_unmatched_files: true
+            generate_release_notes: true
+
