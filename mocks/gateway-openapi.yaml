@@ -1,0 +1,77 @@
+openapi: 3.1.0
+info:
+  title: IOLD Mock Gateway Registration API
+  version: 0.0.0-mock
+  description: Mock contract only. Replace after inspecting the real gateway.
+servers:
+  - url: https://gateway.staging.example.invalid
+paths:
+  /internal/model-endpoints:
+    post:
+      operationId: registerModelEndpoint
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string }
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterEndpointRequest' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Endpoint' }
+  /internal/model-endpoints/{deploymentId}:
+    get:
+      operationId: getModelEndpoint
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/DeploymentId'
+      responses:
+        '200':
+          description: Current registration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Endpoint' }
+    delete:
+      operationId: unregisterModelEndpoint
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/DeploymentId'
+      responses:
+        '204': { description: Unregistered or already absent }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    DeploymentId:
+      in: path
+      name: deploymentId
+      required: true
+      schema: { type: string }
+  schemas:
+    RegisterEndpointRequest:
+      type: object
+      required: [deployment_id, model, base_url, api_key, runtime]
+      properties:
+        deployment_id: { type: string }
+        model: { type: string, example: qwen3.6-35b-a3b }
+        artifact: { type: string, example: unsloth/Qwen3.6-35B-A3B-NVFP4-Fast }
+        base_url: { type: string, format: uri }
+        api_key: { type: string, writeOnly: true }
+        runtime: { type: string, const: vllm }
+        capabilities:
+          type: object
+          additionalProperties: { type: boolean }
+    Endpoint:
+      type: object
+      required: [id, deployment_id, status]
+      properties:
+        id: { type: string }
+        deployment_id: { type: string }
+        status: { type: string, enum: [registering, active, unhealthy] }

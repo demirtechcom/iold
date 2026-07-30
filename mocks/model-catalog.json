@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "notice": "Mock representation; the production revision pin awaits GPU validation.",
+  "models": [
+    {
+      "alias": "qwen3.6-35b-a3b",
+      "base_model": "Qwen/Qwen3.6-35B-A3B",
+      "artifact": "unsloth/Qwen3.6-35B-A3B-NVFP4-Fast",
+      "artifact_revision": "MOCK_REVISION_PIN_PENDING_GPU_VALIDATION",
+      "runtime": "vllm",
+      "quantization": "nvfp4",
+      "hardware": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "validated_target": "RTX PRO 6000",
+        "validated_vram_gib": 96,
+        "minimum_vram_gib": 32
+      },
+      "runtime_defaults": {
+        "port": 8000,
+        "max_model_len": 4096
+      }
+    }
+  ]
+}

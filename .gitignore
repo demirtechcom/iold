@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+.iold/
+models/
+cache/
+dist/
+bin/
